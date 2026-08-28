@@ -100,7 +100,13 @@ GAMEPAD_MINORS = (0x01, 0x02)   # joystick, gamepad
 
 
 def clean(line):
-	"""One line of bluetoothctl output, without the decoration."""
+	"""One line of bluetoothctl output, without the decoration.
+
+	\x01 and \x02 are readline's invisible-text markers, wrapped around the
+	colors when bluetoothctl talks to a terminal - measured on the Pi, they
+	survive ANSI stripping and turn [NEW] into [\x01\x02NEW\x01\x02].
+	"""
+	line = line.replace("\x01", "").replace("\x02", "")
 	return PROMPT.sub("", ANSI.sub("", line)).strip()
 
 

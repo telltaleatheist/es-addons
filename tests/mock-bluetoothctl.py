@@ -246,8 +246,10 @@ def emit_script(script):
 		if delay > 0:
 			time.sleep(delay)
 
-		line = "%s%s%s[%s%s%s]%s Device %s %s" % (
-			ERASE, PROMPT, GREEN, RESET, step["kind"], GREEN, RESET,
+		# the colors ride inside readline's \x01/\x02 invisible-text markers,
+		# exactly as the real bluetoothctl prints them on a terminal
+		line = "%s%s[\x01%s\x02%s\x01%s\x02] Device %s %s" % (
+			ERASE, PROMPT, GREEN, step["kind"], RESET,
 			step["mac"], step.get("tail", ""))
 		sys.stdout.write(line + "\n")
 		sys.stdout.flush()
