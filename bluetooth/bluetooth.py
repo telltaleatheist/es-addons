@@ -12,7 +12,7 @@ The screen is deliberately plain.  A game console's Bluetooth menu exists to
 get a controller working, so:
 
   * known controllers are listed one per row, everything else collapses into a
-    single "Other devices" row;
+    single "Other paired devices" row;
   * "Search for new devices..." scans, and the first controller it finds is
     paired, trusted and connected without asking anything.  A user holding the
     sync button on a pad wants exactly that and nothing else.
@@ -37,6 +37,7 @@ Environment knobs, for testing:
 import json
 import os
 import re
+import pty
 import selectors
 import shutil
 import subprocess
@@ -335,29 +336,37 @@ def info_says_connected(fields):
 # ------------------------------------------------------------ scan session
 
 def start_scan_session():
-	"""A bluetoothctl that stays alive so a scan can run inside it."""
-	command = [BTCTL]
+	"""A bluetoothctl that stays alive so a scan can run inside it.
 
-	# bluetoothctl writing to a pipe is block-buffered by libc, and a scan's
-	# whole point is output that arrives as it happens
-	stdbuf = shutil.which("stdbuf")
-	if stdbuf:
-		command = [stdbuf, "-oL", "-eL"] + command
-
-	return subprocess.Popen(
-		command,
-		stdin=subprocess.PIPE,
-		stdout=subprocess.PIPE,
-		stderr=subprocess.STDOUT,
-		bufsize=0,
-	)
+	It gets a pty, not pipes: bluetoothctl only flushes per line when it
+	believes it is talking to a terminal - measured on the Pi, on a pipe its
+	[NEW]/[CHG] lines sit in a buffer until exit, and stdbuf does not talk it
+	out of that.  Commands go in and events come out through the master side;
+	our own commands echo back too, and the parser just does not match them.
+	"""
+	master, slave = pty.openpty()
+	try:
+		proc = subprocess.Popen(
+			[BTCTL],
+			stdin=slave,
+			stdout=slave,
+			stderr=slave,
+			env=dict(os.environ, TERM="dumb"),
+			close_fds=True,
+		)
+	except Exception:
+		os.close(master)
+		os.close(slave)
+		raise
+	os.close(slave)
+	proc.master_fd = master
+	return proc
 
 
 def session_write(proc, text):
 	try:
-		proc.stdin.write(text.encode("utf-8"))
-		proc.stdin.flush()
-	except (OSError, ValueError) as error:
+		os.write(proc.master_fd, text.encode("utf-8"))
+	except OSError as error:
 		log("could not write %r to the scan session: %s" % (text.strip(), error))
 
 
@@ -365,11 +374,6 @@ def stop_scan_session(proc):
 	"""scan off, exit, and then stop being polite about it."""
 	session_write(proc, "scan off\n")
 	session_write(proc, "exit\n")
-
-	try:
-		proc.stdin.close()
-	except (OSError, ValueError):
-		pass
 
 	try:
 		proc.wait(timeout=SESSION_STOP_TIMEOUT)
@@ -387,8 +391,8 @@ def stop_scan_session(proc):
 				pass
 
 	try:
-		proc.stdout.close()
-	except (OSError, ValueError):
+		os.close(proc.master_fd)
+	except OSError:
 		pass
 
 
@@ -407,7 +411,7 @@ def note_scan_line(line, found, known_macs):
 	if entry is None:
 		entry = found[mac] = {
 			"mac": mac, "name": mac, "icon": None, "class": None,
-			"kind": None, "queried": False,
+			"kind": None, "queried": False, "last_info": 0.0,
 		}
 
 	if kind == "NEW":
@@ -417,10 +421,10 @@ def note_scan_line(line, found, known_macs):
 			entry["name"] = tail or mac
 		return mac
 
-	# [CHG] carries one property at a time, and two of them matter: the name a
-	# nameless device finally admits to, and the icon that says what it is
+	# [CHG] carries one property at a time; name, icon and class are recorded,
+	# and any other property still counts as a sighting worth another look
 	if ":" not in tail:
-		return None
+		return mac
 	key, value = tail.split(":", 1)
 	key, value = key.strip().lower(), value.strip()
 
@@ -435,17 +439,28 @@ def note_scan_line(line, found, known_macs):
 		entry["class"] = value
 		return mac
 
-	return None
+	return mac
 
 
 def resolve_kind(entry):
 	"""Decide whether a discovered device is a controller, asking if need be."""
 	kind = classify(entry["icon"], entry["class"])
 
+	now = time.monotonic()
+	ask = False
 	if kind is None and not entry["queried"]:
 		# neither the icon nor the class has turned up in the scan output, so
 		# ask BlueZ directly - it may already know both
 		entry["queried"] = True
+		ask = True
+	elif kind == "controller" and is_placeholder_name(entry["name"], entry["mac"]) \
+			and now - entry["last_info"] >= 2.0:
+		# it is a controller and we want to put its real name on the pairing
+		# screen - BlueZ often learns the name a moment after the class
+		ask = True
+
+	if ask:
+		entry["last_info"] = now
 		fields = device_info(entry["mac"])
 		if fields:
 			entry["icon"] = entry["icon"] or fields.get("icon")
@@ -490,7 +505,7 @@ def run_scan(known_macs):
 
 	selector = selectors.DefaultSelector()
 	selector.register(STDIN_FD, selectors.EVENT_READ, "es")
-	selector.register(proc.stdout.fileno(), selectors.EVENT_READ, "bt")
+	selector.register(proc.master_fd, selectors.EVENT_READ, "bt")
 	bt_open = True
 
 	started = time.monotonic()
@@ -523,7 +538,10 @@ def run_scan(known_macs):
 
 			timeout = max(0.0, min(deadline, next_update) - now)
 			for key, _ in selector.select(timeout):
-				chunk = os.read(key.fd, 4096)
+				try:
+					chunk = os.read(key.fd, 4096)
+				except OSError:
+					chunk = b""  # a pty master reads EIO, not EOF, when the child goes
 
 				if key.data == "es":
 					if not chunk:
@@ -547,10 +565,12 @@ def run_scan(known_macs):
 						break
 					line = buffer[:newline].decode("utf-8", "replace")
 					buffer = buffer[newline + 1:]
+					already = set(found)
 					mac = note_scan_line(line, found, known_macs)
 					if mac:
 						touched.add(mac)
-						log("discovered %r" % clean(line))
+						if mac not in already:
+							log("discovered %r" % clean(line))
 
 			for mac in touched:
 				entry = found[mac]
@@ -584,6 +604,14 @@ def run_scan(known_macs):
 
 	if eof:
 		raise EOFError("ES closed our stdin")
+
+	if controller is None and not cancelled:
+		# a controller whose name never arrived is still what the user is
+		# holding - pairing it under its MAC beats saying nothing was found
+		for entry in found.values():
+			if entry.get("kind") == "controller":
+				controller = entry
+				break
 
 	return named_found(found), cancelled, None, controller
 
@@ -646,7 +674,7 @@ def show_main_list():
 	if others:
 		items.append({
 			"id": "others",
-			"label": "Other devices",
+			"label": "Other paired devices",
 			"detail": "%d paired" % len(others),
 		})
 

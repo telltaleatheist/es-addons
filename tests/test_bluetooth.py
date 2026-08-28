@@ -6,7 +6,7 @@ JSON object per line each way - with mock-bluetoothctl.py installed on PATH
 under the name "bluetoothctl", and walks the whole addon:
 
   * the main list: controllers one per row, everything else behind one row
-  * the "Other devices" sub-list and a device menu opened from it
+  * the "Other paired devices" sub-list and a device menu opened from it
   * disconnect, and forget with its confirmation
   * a scan that discovers a controller only via a late [CHG] Icon line, and
     pairs it on the spot: pair, then trust, then connect, in that order
@@ -242,14 +242,14 @@ def step_main_list(addon, state_path):
 
 	check(main["title"] == "BLUETOOTH", "title was %r" % main["title"])
 	check(labels(main) == ["Seeded Pad One", "Seeded Pad Two",
-			"Other devices", "Search for new devices..."],
+			"Other paired devices", "Search for new devices..."],
 		"rows were %r" % labels(main))
 	check(detail(main, "Seeded Pad One") == "Connected",
 		"pad one detail was %r" % detail(main, "Seeded Pad One"))
 	check(detail(main, "Seeded Pad Two") == "Not connected",
 		"pad two detail was %r" % detail(main, "Seeded Pad Two"))
-	check(detail(main, "Other devices") == "2 paired",
-		"other devices detail was %r" % detail(main, "Other devices"))
+	check(detail(main, "Other paired devices") == "2 paired",
+		"other devices detail was %r" % detail(main, "Other paired devices"))
 	check(ids(main)[-1] == "scan", "the last row is not the scan row")
 
 
@@ -319,7 +319,7 @@ def step_forget(addon, state_path):
 
 	addon.send(event="confirm", value=True)
 	main = addon.expect("list")
-	check(labels(main) == ["Seeded Pad One", "Other devices",
+	check(labels(main) == ["Seeded Pad One", "Other paired devices",
 			"Search for new devices..."],
 		"rows after forgetting were %r" % labels(main))
 
@@ -436,7 +436,7 @@ def step_manual_pair(addon, state_path):
 
 	addon.send(event="confirm", value=True)
 	main = addon.expect("list")
-	check(detail(main, "Other devices") == "3 paired",
+	check(detail(main, "Other paired devices") == "3 paired",
 		"the headphones did not land under Other devices: %r" % labels(main))
 
 
