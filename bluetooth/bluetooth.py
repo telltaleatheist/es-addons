@@ -31,7 +31,7 @@ a message box, never a traceback.
 
 Environment knobs, for testing:
 
-  ES_BT_SCAN_SECONDS  how long a scan runs (default 20)
+  ES_BT_SCAN_SECONDS  how long a scan runs (default 45)
 """
 
 import json
@@ -46,7 +46,7 @@ import time
 
 # ---------------------------------------------------------------- settings
 
-SCAN_SECONDS = float(os.environ.get("ES_BT_SCAN_SECONDS", "20"))
+SCAN_SECONDS = float(os.environ.get("ES_BT_SCAN_SECONDS", "45"))
 PROGRESS_INTERVAL = 2.0
 
 QUICK_TIMEOUT = 10.0     # devices, info
