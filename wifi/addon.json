@@ -1,6 +1,6 @@
 {
 	"name": "wifi",
-	"title": "Internet",
+	"title": "INTERNET",
 	"type": "menu",
 	"mount": "main-menu",
 	"exec": "run.sh"
