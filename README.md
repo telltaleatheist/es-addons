@@ -23,6 +23,9 @@ chmod +x ~/.emulationstation/addons/wifi/run.sh ~/.emulationstation/addons/wifi/
 
 cp -r slots ~/.emulationstation/addons/slots
 chmod +x ~/.emulationstation/addons/slots/run.sh ~/.emulationstation/addons/slots/slots.py
+
+cp -r video ~/.emulationstation/addons/video
+chmod +x ~/.emulationstation/addons/video/run.sh ~/.emulationstation/addons/video/video.py
 ```
 
 The directory is rescanned every time the menu is built, so a newly installed addon
@@ -230,12 +233,91 @@ immediately rather than waiting forever on a terminal the addon does not have.
 
 Tested against NetworkManager / nmcli 1.42.4 (RetroPie on Raspberry Pi OS Bookworm).
 
+## video
+
+"VIDEO" in the main menu. Forces the HDMI output to a fixed mode, or hands it back to
+the display — Python 3 standard library only, no pip packages, no daemon, no config
+file.
+
+```
+Display                                            1920x1080@60 on HDMI-A-1
+Mode                                          Forced: 1280x720@60 (reboot to apply)
+Automatic (use the display)                              remove the forced mode
+1920x1080@60
+1280x720@60                                                              forced
+```
+
+**Why it exists.** A Pi 5 under KMS takes its video mode from the EDID the display
+hands back, and a capture path that presents no EDID — or a garbage one, which is what
+a vMix input does — gets no picture at all. The usual cure is an EDID emulator dongle,
+a plug that lies about being a 1080p60 television. The kernel parameter
+`video=HDMI-A-1:1920x1080@60D` is that dongle in software: force the mode, and the
+trailing `D` means "drive this port even with no readable EDID". It is a *boot*
+parameter, which is the other half of the fix — a mode set at runtime dies with the
+next power cycle, and this one does not.
+
+The addon is deliberately shallow. It exposes exactly one setting and offers no
+overscan, rotation, colour depth or per-connector matrix, because none of those were
+ever the problem. If this one misbehaves against real capture hardware, that is when
+it grows.
+
+The display is read with `kmsprint`, which runs as `pi` and needs no privileges — the
+plain form for the mode in use, `--modes` for the list. Modes are deduped to
+`WIDTHxHEIGHT@RATE` with the rate rounded, so 59.94 and 60.00 are one row (the first
+reading wins, and kmsprint lists a connector's preferred timing first); interlaced
+modes are dropped, because half a frame at a time is not what "1080p60" means; the
+rest are sorted biggest picture first and capped at twelve.
+
+**1920x1080@60 and 1280x720@60 are always on the list**, whatever kmsprint says,
+including when it says nothing at all — "no display detected" is precisely the
+EDID-less case this addon exists for, and the promise beats the cap, so a 4K monitor
+offering neither of them loses its two smallest modes instead. A `kmsprint` that is
+missing or unhappy is not fatal either: the status row says the display could not be
+read and the picker still works.
+
+**`cmdline.txt` is the one file on a Pi that must not be got wrong** — a mangled
+kernel command line is a machine that does not boot, and there is no login prompt to
+fix it from, only another computer and an SD card reader. So the write is paranoid by
+design:
+
+* the live file is `/boot/firmware/cmdline.txt`. The old `/boot/cmdline.txt` on a
+  current Raspberry Pi OS is a note saying the file has moved, and this addon never
+  touches it;
+* the file is **validated** before it is written — exactly one non-empty line, no
+  other newlines — and anything else is refused by name with nothing written. A
+  `cmdline.txt` this addon does not recognise is one somebody else is looking after;
+* every token that is not a `video=` token comes back byte for byte and in order.
+  Tokens are rejoined with single spaces and one trailing newline, which is what a
+  kernel command line is;
+* `cmdline.txt.orig` is written once, ever, the first time the addon changes anything,
+  and never touched again: it is what the machine shipped with. `cmdline.txt.bak` is
+  the state before *this* change and is rewritten every time. **A backup that will not
+  write aborts the change**, because the backup is the entire safety net;
+* a write that would not change a byte is not performed at all;
+* the file is re-read and re-validated immediately before the write, not reused from
+  when the screen was drawn.
+
+The file belongs to root and the addon runs as `pi` with no terminal, so the write is
+`sudo -n tee <path>` with the content on stdin — `tee` rather than a shell, so no part
+of a path is ever parsed as a command — and `write_argv()` is the one place that
+command line is built. `reboot_argv()` is the same, for the same reason. `-n` means a
+sudo that wants a password fails immediately instead of hanging.
+
+Every change is confirmed first, and the question says where the escape hatch is
+("if the screen stays black afterward, edit `video=` out of
+`/boot/firmware/cmdline.txt` from ssh"). A change that stuck offers a reboot; decline
+it and the Mode row reads `(reboot to apply)` until the machine restarts.
+
+`ES_VIDEO_CMDLINE`, `ES_VIDEO_KMSPRINT`, `ES_VIDEO_WRITE` and `ES_VIDEO_REBOOT` are
+how the tests hook in; nothing else reads them.
+
 ## Tests
 
 ```sh
 python3 tests/test_bluetooth.py
 python3 tests/test_wifi.py
 python3 tests/test_slots.py
+python3 tests/test_video.py
 ```
 
 `tests/mock-bluetoothctl.py` is a fake `bluetoothctl` — enough of one to answer
@@ -302,3 +384,30 @@ claim that leaves the file alone because it already said so, three pads where th
 second claim really does reorder it, `back`, a machine with no controllers, and a pad
 whose event node will not open. One check imports the addon directly, because the
 mocks hide the one command line that matters: `sudo -n tee <led>`, value on stdin.
+
+`tests/mock-kmsprint.py` is a fake `kmsprint` — enough of one to emit both forms the
+addon reads (the plain connector/encoder/crtc/plane walk, and `--modes`) from a JSON
+state file, with the timing detail that follows every mode, so a parser that only ever
+saw a bare mode string fails here rather than on a Pi. `tests/mock-video-write.py`
+stands in for the `sudo -n tee` that rewrites `cmdline.txt`, logging the destination
+and the content of every write so a test can see `.orig` and `.bak` go down *before*
+the file the machine boots from, and refusing every write while a flag file exists.
+`tests/mock-reboot.py` stands in for `sudo -n reboot` and does nothing but say it ran.
+`tests/mock-cmdline/cmdline.txt` is a real Pi 5 command line and
+`cmdline-garbage.txt` is one somebody has been editing with a text editor.
+
+`tests/test_video.py` plays the EmulationStation side over pipes, giving each run its
+own temp-directory Pi: the main list with a 4K television's modes deduped (59.94 and
+60.00 collapsed), interlaced rows dropped, both promised modes present and the cap
+kept; the status and Mode details; forcing a mode with every other token byte for
+byte, `.orig` written once and `.bak` before the file itself, and a declined reboot
+leaving `(reboot to apply)` on the row; a second mode that replaces the token rather
+than adding one; the same mode twice, where the second writes nothing; a write helper
+that refuses, which aborts at the backup; Automatic taking the token back out; a
+reboot that refuses and then one that does not; a `cmdline.txt` that is not one line,
+refused by name and untouched; a monitor offering neither promised mode, where the
+promise beats the cap and the cap still holds; a Pi with no display, which still
+offers 1080p60 and 720p60 on `HDMI-A-1`; a display on the second HDMI port, which is
+the port the token names; and a machine with no `kmsprint` at all. It prints PASS or
+FAIL per step and exits non-zero on any failure. No Pi, no HDMI, no sudo, and nothing
+outside its own temp directory is ever written.

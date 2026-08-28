@@ -1,0 +1,7 @@
+{
+	"name": "video",
+	"title": "VIDEO",
+	"type": "menu",
+	"mount": "main-menu",
+	"exec": "run.sh"
+}
