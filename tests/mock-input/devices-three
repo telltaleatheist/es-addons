@@ -1,0 +1,43 @@
+I: Bus=0005 Vendor=057e Product=2009 Version=0001
+N: Name="Nintendo Switch Pro Controller"
+P: Phys=e4:5f:01:aa:bb:cc
+S: Sysfs=/devices/platform/soc/fe201000.serial/bluetooth/hci0/hci0:11/0005:057E:2009.0003/input/input3
+U: Uniq=98:b6:e9:11:22:33
+H: Handlers=event3 js0
+B: PROP=0
+B: EV=20000b
+B: KEY=7fdb000000000000 0 0 0 0
+B: ABS=3003f
+
+I: Bus=0005 Vendor=2dc8 Product=3106 Version=0001
+N: Name="8BitDo Ultimate 2C Wireless"
+P: Phys=e4:5f:01:aa:bb:cc
+S: Sysfs=/devices/platform/soc/fe201000.serial/bluetooth/hci0/hci0:12/0005:2DC8:3106.0004/input/input5
+U: Uniq=e4:17:d8:44:55:66
+H: Handlers=event5 js1
+B: PROP=0
+B: EV=20000b
+B: KEY=7fdb000000000000 0 0 0 0
+B: ABS=3003f
+
+I: Bus=0003 Vendor=045e Product=028e Version=0114
+N: Name="Microsoft X-Box 360 pad"
+P: Phys=usb-0000:01:00.0-1.1/input0
+S: Sysfs=/devices/platform/axi/1000120000.pcie/0003:045E:028E.0005/input/input7
+U: Uniq=
+H: Handlers=event7 js2
+B: PROP=0
+B: EV=20000b
+B: KEY=fff0000000000000 0 0 0 0
+B: ABS=3003f
+
+I: Bus=0003 Vendor=0079 Product=0006 Version=0110
+N: Name="DragonRise Arcade Stick"
+P: Phys=usb-0000:01:00.0-1.2/input0
+S: Sysfs=/devices/platform/axi/1000120000.pcie/0003:0079:0006.0006/input/input8
+U: Uniq=
+H: Handlers=js3
+B: PROP=0
+B: EV=1b
+B: KEY=fff00000000 0 0 0 0
+B: ABS=3

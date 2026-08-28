@@ -20,6 +20,9 @@ chmod +x ~/.emulationstation/addons/bluetooth/bluetooth.py
 
 cp -r wifi ~/.emulationstation/addons/wifi
 chmod +x ~/.emulationstation/addons/wifi/run.sh ~/.emulationstation/addons/wifi/wifi.py
+
+cp -r slots ~/.emulationstation/addons/slots
+chmod +x ~/.emulationstation/addons/slots/run.sh ~/.emulationstation/addons/slots/slots.py
 ```
 
 The directory is rescanned every time the menu is built, so a newly installed addon
@@ -80,6 +83,64 @@ missing `bluetoothctl` is a message box, never a traceback. Debugging noise goes
 stderr, which is where ES's own stderr goes.
 
 Tested against BlueZ 5.66 (Raspberry Pi OS Bookworm).
+
+## slots
+
+"CONTROLLER ORDER" in the main menu. Says which pad is which player, and lets you
+change it the way the Switch does — by pressing a button on the one you want to be
+Player 1 — Python 3 standard library only, no pip packages, no daemon, no config
+file.
+
+```
+Player 1                                 8BitDo Ultimate 2C Wireless
+Player 2                                            press any button
+Start or B exits
+```
+
+The first pad to press a button becomes Player 1, the next distinct pad Player 2, and
+so on; the pads nobody touched keep the remaining slots in the order the kernel found
+them. The rows are informational — the input is the controller itself, so a select is
+ignored.
+
+**Every claim is applied the moment it happens**, and there is no save step. START is
+ES's own way out of an addon and closes the screen whatever the addon thinks, which is
+exactly the gesture people expect here — so an assignment that was not already on disk
+when the button went down would be an assignment that never happened. A claim rewrites
+`retroarch.cfg`, repaints that pad's player LEDs and redraws the list, in that order,
+before anything else is looked at.
+
+A controller is an entry in `/proc/bus/input/devices` whose `H: Handlers=` line has a
+`jsN` in it. The same physical pad often has more than one entry — a Pro Controller's
+motion sensors are a second entry with `Handlers=event9` and no js — and those are not
+pads; a screen offering "Player 3" for a gyroscope would be lying. `pi` is in the
+`input` group, so the event nodes are read directly, with no sudo; a node that will not
+open says so in its own row and the other pads still work.
+
+A claim is an `EV_KEY` press and only that. `EV_ABS` is ignored entirely — sticks
+drift, a d-pad is an axis on most pads, and a slot claimed by a controller sitting on a
+shelf is worse than no feature at all. `BTN_START` is the exit gesture and `BTN_MODE`
+is the home button, so neither claims either.
+
+The order is written to `input_player1_joypad_index` … `input_player10_joypad_index` in
+`/opt/retropie/configs/all/retroarch.cfg`: claimed pads first in claim order, then the
+untouched ones, then the player lines past the last pad take the indices no pad is
+using, so all ten lines still hold ten different values — two players sharing an index
+is how RetroArch ends up driving one pad from two sets of inputs. Every other line
+comes back byte for byte, quoting and all, and the file is replaced by a rename, never
+written in place. It is only rewritten when the assignment actually changed.
+
+**The RetroArch index is an assumption, and it is written down.** RetroArch uses the
+udev joypad driver, whose indices are the order it enumerates joystick devices in; this
+addon takes that to be ascending event-node order. A single-pad machine cannot be
+affected either way; multi-pad ordering gets checked on hardware. `pad_index()` is the
+one place that decides it.
+
+Player LEDs (`/sys/class/leds/<hidid>:green:player-N/brightness`) belong to root, so
+they go through `sudo -n tee` and `led_command()` is the one place that command line is
+built. The `<hidid>` — `0005:057E:2009.0004` and its colons — appears in the pad's
+`Sysfs` path, which is the only thing tying a LED to the controller it is on. A pad
+with no player LEDs is skipped in silence; a LED that will not light is a log line and
+nothing more.
 
 ## wifi
 
@@ -174,6 +235,7 @@ Tested against NetworkManager / nmcli 1.42.4 (RetroPie on Raspberry Pi OS Bookwo
 ```sh
 python3 tests/test_bluetooth.py
 python3 tests/test_wifi.py
+python3 tests/test_slots.py
 ```
 
 `tests/mock-bluetoothctl.py` is a fake `bluetoothctl` — enough of one to answer
@@ -220,3 +282,23 @@ from a saved network's menu, a refused rescan, cancelling a rescan with B, and
 closing. It also asserts no password ever reaches stderr. It prints PASS or FAIL per
 step and exits non-zero on any failure. No hardware, no radio, no sudo, no service
 manager.
+
+`tests/mock-input/` is a fake Pi's worth of input hardware: `devices` (and its
+`-three`, `-none` and `-unreadable` variants) stand in for
+`/proc/bus/input/devices`, complete with the keyboard, the mouse, a joystick with no
+event node and the js-less sibling entry a Pro Controller's motion sensors register;
+`retroarch.cfg` is a real-shaped config with ten player lines, one of them unquoted,
+one wearing a trailing comment, and two decoys that only look like ours.
+`tests/mock-led-write.py` stands in for the `sudo -n tee` that lights a player LED,
+logging every write so a test can see three LEDs go dark as one lights.
+
+`tests/test_slots.py` builds that fake Pi in a temp directory — the event nodes are
+FIFOs the test writes 24-byte `input_event` structs into — and walks the addon: the
+list with the sibling entries left off it, `BTN_START` and a stick shoved to its stop
+claiming nothing, a pad claiming Player 1 and the `retroarch.cfg` rewrite that
+follows it (unrelated lines byte for byte, quoting kept, ten different indices), the
+LEDs, a repeat press that does nothing at all, a select the rows do not answer, a
+claim that leaves the file alone because it already said so, three pads where the
+second claim really does reorder it, `back`, a machine with no controllers, and a pad
+whose event node will not open. One check imports the addon directly, because the
+mocks hide the one command line that matters: `sudo -n tee <led>`, value on stdin.

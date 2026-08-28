@@ -1,0 +1,7 @@
+{
+	"name": "slots",
+	"title": "CONTROLLER ORDER",
+	"type": "menu",
+	"mount": "main-menu",
+	"exec": "run.sh"
+}

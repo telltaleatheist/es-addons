@@ -1,0 +1,27 @@
+I: Bus=0003 Vendor=413c Product=2113 Version=0111
+N: Name="Dell KB216 Wired Keyboard"
+P: Phys=usb-0000:01:00.0-1.3/input0
+S: Sysfs=/devices/platform/axi/1000120000.pcie/0003:413C:2113.0001/input/input1
+U: Uniq=
+H: Handlers=sysrq kbd event1 leds
+B: PROP=0
+B: EV=120013
+
+I: Bus=0003 Vendor=046d Product=c534 Version=0111
+N: Name="Logitech USB Receiver Mouse"
+P: Phys=usb-0000:01:00.0-1.4/input1
+S: Sysfs=/devices/platform/axi/1000120000.pcie/0003:046D:C534.0002/input/input2
+U: Uniq=
+H: Handlers=mouse0 event2
+B: PROP=0
+B: EV=17
+
+I: Bus=0005 Vendor=057e Product=2009 Version=0001
+N: Name="Nintendo Switch Pro Controller IMU"
+P: Phys=e4:5f:01:aa:bb:cc
+S: Sysfs=/devices/platform/soc/fe201000.serial/bluetooth/hci0/hci0:11/0005:057E:2009.0003/input/input4
+U: Uniq=98:b6:e9:11:22:33
+H: Handlers=event4
+B: PROP=0
+B: EV=9
+B: ABS=6003f
