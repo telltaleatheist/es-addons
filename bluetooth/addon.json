@@ -1,0 +1,7 @@
+{
+	"name": "bluetooth",
+	"title": "BLUETOOTH",
+	"type": "menu",
+	"mount": "main-menu",
+	"exec": "bluetooth.py"
+}
