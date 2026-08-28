@@ -9,12 +9,16 @@ State lives in the JSON file named by MOCK_BT_STATE and persists across
 invocations, because the addon runs bluetoothctl once per question:
 
     {
-      "devices":      [ {"mac","name","icon","class","connected"} ],
+      "devices":      [ {"mac","name","icon","class","connected","trusted"} ],
       "discoverable": { "MAC": {"name","icon","class"} },
       "scan_script":  [ {"at": 0.3, "kind": "NEW"|"CHG", "mac", "tail"} ],
-      "fail_step":    null | "pair" | "trust" | "connect",
+      "fail_step":    null | "pair" | "trust" | "untrust" | "connect",
       "log":          [ "devices", "info AA:..", ... ]
     }
+
+"trusted" is BlueZ's own flag and is real state here: "info" prints it, "trust"
+and "untrust" set it, and a device paired by this mock starts untrusted, the
+way a freshly paired device does.
 
 "at" is seconds after "scan on".  Every scripted line is emitted with the
 colour codes and the redrawn prompt that real interactive bluetoothctl mixes
@@ -112,7 +116,7 @@ def cmd_info(state, args):
 		if device.get("icon"):
 			out("\tIcon: %s" % device["icon"])
 		out("\tPaired: yes")
-		out("\tTrusted: yes")
+		out("\tTrusted: %s" % ("yes" if device.get("trusted") else "no"))
 		out("\tBlocked: no")
 		out("\tConnected: %s" % ("yes" if device.get("connected") else "no"))
 		out("\tUUID: Human Interface Device    (00001124-0000-1000-8000-00805f9b34fb)")
@@ -156,6 +160,7 @@ def cmd_pair(state, args):
 			"icon": icon,
 			"class": seen.get("class"),
 			"connected": False,
+			"trusted": False,
 		}
 		state.setdefault("devices", []).append(device)
 
@@ -171,8 +176,28 @@ def cmd_trust(state, args):
 		out("Failed to trust: org.bluez.Error.Failed")
 		return 1
 
+	device = find(state, mac)
+	if device is not None:
+		device["trusted"] = True
+
 	out("[CHG] Device %s Trusted: yes" % mac)
 	out("Changing %s trust succeeded" % mac)
+	return 0
+
+
+def cmd_untrust(state, args):
+	mac = args[0].upper()
+
+	if state.get("fail_step") == "untrust":
+		out("Failed to untrust: org.bluez.Error.Failed")
+		return 1
+
+	device = find(state, mac)
+	if device is not None:
+		device["trusted"] = False
+
+	out("[CHG] Device %s Trusted: no" % mac)
+	out("Changing %s untrust succeeded" % mac)
 	return 0
 
 
@@ -229,6 +254,7 @@ ONE_SHOTS = {
 	"info": cmd_info,
 	"pair": cmd_pair,
 	"trust": cmd_trust,
+	"untrust": cmd_untrust,
 	"connect": cmd_connect,
 	"disconnect": cmd_disconnect,
 	"remove": cmd_remove,

@@ -15,7 +15,12 @@ get a controller working, so:
     single "Other paired devices" row;
   * "Search for new devices..." scans, and the first controller it finds is
     paired, trusted and connected without asking anything.  A user holding the
-    sync button on a pad wants exactly that and nothing else.
+    sync button on a pad wants exactly that and nothing else;
+  * a device's own menu carries "Auto-reconnect", which is whether this box may
+    reach for the device on its own.  A pad wants that on and is paired with it
+    on; a keyboard that spends its day on a desk wants it off, and is paired
+    with it off, so pairing it here does not take it away from the computer it
+    belongs to.
 
 Everything this addon knows about Bluetooth it learns from bluetoothctl:
 
@@ -31,7 +36,9 @@ a message box, never a traceback.
 
 Environment knobs, for testing:
 
-  ES_BT_SCAN_SECONDS  how long a scan runs (default 45)
+  ES_BT_SCAN_SECONDS      how long a scan runs (default 45)
+  ES_BT_AUTOCONNECT_CONF  the auto-reconnect list to read and rewrite
+  ES_BT_CONF_WRITE        a program to run instead of "sudo -n tee"
 """
 
 import json
@@ -50,9 +57,14 @@ import time
 SCAN_SECONDS = float(os.environ.get("ES_BT_SCAN_SECONDS", "45"))
 PROGRESS_INTERVAL = 2.0
 
+AUTOCONNECT_CONF = os.environ.get(
+	"ES_BT_AUTOCONNECT_CONF", "/etc/bt-controller-autoconnect.conf")
+CONF_WRITE = os.environ.get("ES_BT_CONF_WRITE", "")
+
 QUICK_TIMEOUT = 10.0     # devices, info
-ACTION_TIMEOUT = 30.0    # connect, disconnect, trust, remove
+ACTION_TIMEOUT = 30.0    # connect, disconnect, trust, untrust, remove
 PAIR_TIMEOUT = 45.0      # pair, which waits on the other end of the radio
+CONF_WRITE_TIMEOUT = 10.0   # one short file through tee
 SESSION_STOP_TIMEOUT = 5.0
 
 BTCTL = shutil.which("bluetoothctl")
@@ -337,6 +349,195 @@ def device_info(mac):
 
 def info_says_connected(fields):
 	return fields.get("connected", "").strip().lower() == "yes"
+
+
+def info_says_trusted(fields):
+	return fields.get("trusted", "").strip().lower() == "yes"
+
+
+# --------------------------------------------------------- auto-reconnect
+
+# Two things can connect a device with nobody pressing anything, they work in
+# opposite directions, and "Auto-reconnect" is the one switch over both:
+#
+#   * BlueZ's trusted flag lets the DEVICE reach us - a trusted device's own
+#     connection attempts are accepted without a question.  "bluetoothctl info"
+#     prints it, "trust" and "untrust" set it;
+#   * bt-controller-autoconnect.service reaches OUT for the device, running
+#     "connect" every ten seconds for every MAC listed in AUTOCONNECT_CONF that
+#     is paired and not connected.
+#
+# The conf is root-owned and world-readable, so reading it needs no privilege
+# and writing it goes through conf_write_argv.  Its format is one device per
+# line, the MAC first and the rest of the line the service's to ignore:
+#
+#   # MAC address            # device
+#   DC:68:EB:EB:5C:C3        # Nintendo Switch Pro Controller
+
+CONF_HEADER = "# MAC address            # device\n"
+
+
+def read_conf_lines():
+	"""The auto-reconnect conf, line by line, endings kept.
+
+	No file is an empty conf: a machine that has never auto-connected anything
+	has nothing to list.  None means there IS a file and it would not be read,
+	which is a different answer and never becomes "empty" - rewriting a file we
+	could not read would throw away devices somebody else put in it.
+	"""
+	try:
+		with open(AUTOCONNECT_CONF, "r", encoding="utf-8",
+				errors="surrogateescape") as handle:
+			return handle.read().splitlines(True)
+	except FileNotFoundError:
+		return []
+	except OSError as error:
+		log("could not read %s: %s" % (AUTOCONNECT_CONF, error))
+		return None
+
+
+def conf_mac(line):
+	"""The MAC one conf line lists, uppercased.  "" for a comment or a blank.
+
+	The service reads the first whitespace-delimited field and ignores the rest
+	of the line, so this reads exactly as much of a line as the service does.
+	BlueZ prints a MAC in upper case, but a file somebody typed may not be.
+	"""
+	text = line.strip()
+	if not text or text.startswith("#"):
+		return ""
+	return text.split()[0].upper()
+
+
+def conf_lists(lines, mac):
+	return any(conf_mac(line) == mac.upper() for line in lines)
+
+
+def conf_entry(mac, name):
+	"""One device's line, in the shape the file already uses.
+
+	The name is only a comment, and it is whatever the device felt like calling
+	itself, so its line breaks are flattened: one device is one line, and a
+	gadget does not get to write a second one.
+	"""
+	return "%-17s        # %s\n" % (mac.upper(), " ".join(name.split()))
+
+
+def conf_with(lines, mac, name):
+	"""The conf, listing this device.  Unchanged when it already does.
+
+	Every other line comes back exactly as it went in - the header, the other
+	devices and the comments naming them - because this file is a list somebody
+	keeps and we are editing one line of it.  A conf that is not there yet is
+	written with the header the service's own carries.
+	"""
+	if conf_lists(lines, mac):
+		return lines
+
+	updated = list(lines)
+	if not updated:
+		updated.append(CONF_HEADER)
+	elif not updated[-1].endswith("\n"):
+		updated[-1] += "\n"     # one device per line, whatever the last one did
+
+	updated.append(conf_entry(mac, name))
+	return updated
+
+
+def conf_without(lines, mac):
+	"""The conf, not listing this device.  Every other line survives."""
+	return [line for line in lines if conf_mac(line) != mac.upper()]
+
+
+def conf_write_argv(path):
+	"""The one place the privileged conf write is built: the argv, path included.
+
+	/etc/bt-controller-autoconnect.conf belongs to root and the addon runs as
+	"pi" with no terminal, so the real write is "sudo -n tee <path>" with the
+	whole new file on stdin - tee rather than a shell, so no part of a path or
+	a device's name is ever parsed as a command.  -n means a sudo that wants a
+	password fails immediately instead of waiting forever on a terminal this
+	process does not have.
+
+	ES_BT_CONF_WRITE replaces the whole thing with one program taking the
+	destination path, which is how the tests watch what would have been
+	written.
+	"""
+	if CONF_WRITE:
+		return [CONF_WRITE, path]
+	return ["sudo", "-n", "tee", path]
+
+
+def write_conf(lines):
+	"""Put the conf back, through root.  "" when it stuck, else why not."""
+	argv = conf_write_argv(AUTOCONNECT_CONF)
+
+	try:
+		done = subprocess.run(
+			argv,
+			input="".join(lines),
+			stdout=subprocess.DEVNULL,   # tee echoes what it wrote; ES is not interested
+			stderr=subprocess.PIPE,
+			timeout=CONF_WRITE_TIMEOUT,
+			text=True,
+			errors="replace",
+		)
+	except subprocess.TimeoutExpired:
+		log("%s did not answer within %gs" % (argv[0], CONF_WRITE_TIMEOUT))
+		return "%s did not answer within %g seconds." % (argv[0], CONF_WRITE_TIMEOUT)
+	except OSError as error:
+		log("could not run %s: %s" % (argv[0], error))
+		return "Could not run %s: %s" % (argv[0], error)
+
+	if done.returncode != 0:
+		detail = (done.stderr or "").strip().splitlines()
+		reason = detail[-1] if detail else "exit status %d" % done.returncode
+		log("%s -> exit %d, %r" % (" ".join(argv), done.returncode, reason))
+		return "Could not write %s: %s" % (AUTOCONNECT_CONF, reason)
+
+	log("wrote %s" % AUTOCONNECT_CONF)
+	return ""
+
+
+def set_conf_autoconnect(mac, name, wanted):
+	"""List this device in the conf, or take it out.  "" when the file agrees.
+
+	Nothing is written when the file already says what we mean, so a device
+	that is listed once stays listed once, and turning auto-reconnect off for a
+	device on a machine with no conf at all touches nothing.
+
+	It is the half of auto-reconnect that trust is not, and it is kept separate
+	from it: pairing a controller already runs "trust" as one of its steps, and
+	this is what it calls afterwards rather than running trust a second time.
+	"""
+	lines = read_conf_lines()
+	if lines is None:
+		return ("Could not read %s, so the auto-reconnect list was left alone."
+			% AUTOCONNECT_CONF)
+
+	updated = conf_with(lines, mac, name) if wanted else conf_without(lines, mac)
+	if updated == lines:
+		return ""
+
+	return write_conf(updated)
+
+
+def autoconnect_on(mac):
+	"""Whether anything could connect this device with nobody asking it to.
+
+	On when EITHER mechanism is live, and Off only when neither is: a row
+	saying Off while the dial-out service is still reaching for a keyboard
+	every ten seconds would be a lie.  A conf that will not read is counted the
+	same way, because it may well be listing the device.
+	"""
+	if info_says_trusted(device_info(mac)):
+		return True
+
+	lines = read_conf_lines()
+	if lines is None:
+		return True
+
+	return conf_lists(lines, mac)
 
 
 # ------------------------------------------------------------ scan session
@@ -708,11 +909,20 @@ def show_device_menu():
 		show_main_list()
 		return
 
+	# asked again rather than remembered: the row has to say what is true now,
+	# including after a change that only half happened
+	current["autoconnect"] = autoconnect_on(current["mac"])
+
 	items = []
 	if current.get("connected"):
 		items.append({"id": "disconnect", "label": "Disconnect"})
 	else:
 		items.append({"id": "connect", "label": "Connect"})
+	items.append({
+		"id": "autoconnect",
+		"label": "Auto-reconnect",
+		"detail": "On" if current["autoconnect"] else "Off",
+	})
 	items.append({"id": "forget", "label": "Forget this device", "detail": current["mac"]})
 
 	send(cmd="list", title=current["name"], items=items)
@@ -764,6 +974,51 @@ def do_disconnect():
 			"Could not disconnect %s. %s" % (current["name"], result.detail))
 
 
+def do_autoconnect():
+	"""Flip auto-reconnect, both halves of it, and redraw the menu.
+
+	This asks nothing first, deliberately.  The wifi addon's SSH row puts a
+	question in front of the same kind of switch because turning SSH off can
+	cut a machine off from the desk it is administered from; this one is a
+	preference the same row turns straight back on, so a confirmation would be
+	one button press bought for nothing.
+
+	The menu it redraws reads the state back out of BlueZ and the conf rather
+	than assuming the change landed, so a half-done flip - untrusted, but a
+	conf line the write could not remove - shows the state that is really
+	there and not the one that was asked for.
+	"""
+	global screen
+	screen = "progress"
+
+	mac = current["mac"]
+	name = current["name"]
+	turning_on = not current.get("autoconnect")
+
+	send(cmd="progress", title="AUTO-RECONNECT",
+		text="%s auto-reconnect for %s..."
+			% ("Turning on" if turning_on else "Turning off", name))
+
+	result = run_btctl(["trust" if turning_on else "untrust", mac], ACTION_TIMEOUT)
+	drain_events()
+
+	if not result.ok:
+		show_message("AUTO-RECONNECT",
+			"Could not turn auto-reconnect %s for %s. %s"
+				% ("on" if turning_on else "off", name, result.detail),
+			after="device")
+		return
+
+	problem = set_conf_autoconnect(mac, name, turning_on)
+	drain_events()
+
+	if problem:
+		show_message("AUTO-RECONNECT", problem, after="device")
+		return
+
+	show_device_menu()
+
+
 def do_forget():
 	global screen
 	screen = "progress"
@@ -781,7 +1036,15 @@ def do_forget():
 
 
 def do_pair(device, automatic):
-	"""Pair, trust, then connect - and say which of the three said no.
+	"""Pair, then connect - and say which of the steps said no.
+
+	How a device is set up depends on what it is.  A controller is trusted and
+	written into the auto-reconnect list, because somebody holding a sync
+	button wants the pad to come back by itself every time after this one.
+	Anything else is paired and connected and nothing more: a keyboard that
+	spends its day on a desk should go on working there, this box has no
+	business grabbing it back, and its own menu is where auto-reconnect is
+	turned on if that is what somebody wants.
 
 	Once this has started it runs to its end: a half-paired device is worse
 	than a slow menu, so "back" is read and dropped rather than obeyed.
@@ -791,22 +1054,28 @@ def do_pair(device, automatic):
 
 	name = device["name"]
 	mac = device["mac"]
+	controller = device.get("kind") == "controller"
 
 	if automatic:
-		steps = (
-			("pair", "Found %s - pairing..." % name, ["pair", mac], PAIR_TIMEOUT),
-			("trust", "Found %s - trusting..." % name, ["trust", mac], ACTION_TIMEOUT),
-			("connect", "Found %s - connecting..." % name, ["connect", mac], ACTION_TIMEOUT),
-		)
+		texts = {
+			"pair": "Found %s - pairing..." % name,
+			"trust": "Found %s - trusting..." % name,
+			"connect": "Found %s - connecting..." % name,
+		}
 	else:
-		steps = (
-			("pair", "Pairing with %s..." % name, ["pair", mac], PAIR_TIMEOUT),
-			("trust", "Trusting %s..." % name, ["trust", mac], ACTION_TIMEOUT),
-			("connect", "Connecting to %s..." % name, ["connect", mac], ACTION_TIMEOUT),
-		)
+		texts = {
+			"pair": "Pairing with %s..." % name,
+			"trust": "Trusting %s..." % name,
+			"connect": "Connecting to %s..." % name,
+		}
 
-	for step, text, args, timeout in steps:
-		send(cmd="progress", title="PAIRING", text=text)
+	steps = [("pair", ["pair", mac], PAIR_TIMEOUT)]
+	if controller:
+		steps.append(("trust", ["trust", mac], ACTION_TIMEOUT))
+	steps.append(("connect", ["connect", mac], ACTION_TIMEOUT))
+
+	for step, args, timeout in steps:
+		send(cmd="progress", title="PAIRING", text=texts[step])
 		result = run_btctl(args, timeout)
 		drain_events()
 
@@ -814,6 +1083,17 @@ def do_pair(device, automatic):
 			show_message("PAIRING FAILED",
 				"Could not set up %s: the %s step failed. %s" % (name, step, result.detail))
 			return
+
+	# the other half of the trust step: that one lets the pad reach us, and the
+	# conf line is what has the machine go out and get it
+	problem = set_conf_autoconnect(mac, name, True) if controller else ""
+	drain_events()
+
+	if problem:
+		show_message("CONNECTED",
+			"%s is paired and connected, but auto-reconnect could not be turned "
+			"on. %s" % (name, problem))
+		return
 
 	show_message("CONNECTED", "%s is paired and connected." % name)
 
@@ -889,6 +1169,10 @@ def on_select(item_id):
 	elif item_id == "disconnect":
 		do_disconnect()
 
+	elif item_id == "autoconnect":
+		# no question first: see do_autoconnect
+		do_autoconnect()
+
 	elif item_id == "forget":
 		send(cmd="confirm", title="FORGET?",
 			text="Remove %s? You will need to pair it again." % current["name"])
@@ -917,6 +1201,9 @@ def on_confirm(value):
 		if after_message == "close":
 			send(cmd="close")
 			sys.exit(0)
+		if after_message == "device":
+			show_device_menu()
+			return
 		show_main_list()
 
 	else:

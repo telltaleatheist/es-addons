@@ -58,7 +58,7 @@ sub-list. A device is a controller when BlueZ's `Icon` is `input-gaming`, or, wh
 there is no icon yet, when its class of device is a peripheral whose minor class is
 joystick or gamepad.
 
-**Search for new devices** is the pairing flow. It scans for 20 seconds and the
+**Search for new devices** is the pairing flow. It scans for 45 seconds and the
 *first* newly discovered controller is paired, trusted and connected immediately —
 no list, no confirmation, the progress screen just narrates it:
 
@@ -79,7 +79,35 @@ which BlueZ names after their own MAC, are dropped as noise, as are devices alre
 known), and anything picked from that list asks before pairing.
 
 **A device's own menu** — reached from either list — offers Connect *or* Disconnect,
-whichever applies, and "Forget this device", which asks first.
+whichever applies, **Auto-reconnect**, and "Forget this device", which asks first.
+
+**Auto-reconnect** is whether this box may reach for the device on its own. It is one
+switch over two independent mechanisms, and it reads `On` if *either* of them is live,
+`Off` only when neither is — a row saying `Off` while something is still grabbing the
+device would be a lie:
+
+* BlueZ's **trusted** flag, which lets the device connect *to* the Pi without being
+  asked (`bluetoothctl info` prints it, `trust` / `untrust` set it);
+* a line in `/etc/bt-controller-autoconnect.conf`, which
+  `bt-controller-autoconnect.service` reads to decide who to dial *out* to every ten
+  seconds.
+
+Toggling it sets both: on is `trust` plus a conf line, off is `untrust` plus the line
+taken back out. It acts the moment the row is chosen — no confirmation, unlike the
+wifi addon's SSH row, because this is a preference the same row turns straight back on
+rather than something that can cut a machine off from the desk it is administered
+from. Every other line of the conf survives byte for byte, including the header and
+the other devices' name comments; the file is root-owned, so the rewrite goes through
+`sudo -n tee <conf>` with the whole new file on stdin and `conf_write_argv()` is the
+one place that command line is built. A write that is refused says so and leaves the
+row saying what is really true.
+
+**Pairing sets it the way the device's kind wants it.** A controller is trusted and
+given a conf line — somebody holding a sync button wants the pad back by itself every
+time after this one. Anything else is paired and connected and *nothing more*: a
+keyboard that spends its day on a desk goes on working there, and this box does not
+yank it away from the computer it belongs to. Its own menu is where auto-reconnect
+gets turned on if that is what somebody wants.
 
 Everything `bluetoothctl` is asked has a timeout, and a timeout, a failure or a
 missing `bluetoothctl` is a message box, never a traceback. Debugging noise goes to
@@ -321,19 +349,32 @@ python3 tests/test_video.py
 ```
 
 `tests/mock-bluetoothctl.py` is a fake `bluetoothctl` — enough of one to answer
-`devices`, `info`, `pair`, `trust`, `connect`, `disconnect` and `remove` from a JSON
-state file, and to play a scripted discovery over an interactive session, wearing the
-colour codes and the redrawn prompt that real bluetoothctl mixes into its output.
+`devices`, `info`, `pair`, `trust`, `untrust`, `connect`, `disconnect` and `remove`
+from a JSON state file, with `Trusted` as real state that `trust` and `untrust` flip,
+and to play a scripted discovery over an interactive session, wearing the colour codes
+and the redrawn prompt that real bluetoothctl mixes into its output.
+`tests/mock-conf-write.py` stands in for the `sudo -n tee` that rewrites the
+auto-reconnect conf, logging the content of every write so a test can see that a line
+already there is not written a second time, and refusing every write while a flag file
+exists.
 
 `tests/test_bluetooth.py` plays the EmulationStation side over pipes: it puts the
 mock on `PATH` as `bluetoothctl` and walks the addon end to end — the main list, the
-Other devices sub-list, disconnect, forget, a scan that auto-pairs a controller
-identified only by a late `[CHG] Icon` line, a pairing whose trust step fails, a scan
-with no controller in it, pairing by hand, cancelling a scan, and closing. It prints
-PASS or FAIL per step and exits non-zero on any failure. No hardware, no radio.
+Other devices sub-list, disconnect, forget, the Auto-reconnect row in every
+combination of its two mechanisms and in both directions (with the header and the
+other device's line surviving byte for byte, and a refused write leaving a row that
+still tells the truth), a scan that auto-pairs a controller identified only by a late
+`[CHG] Icon` line and lists it for auto-reconnect, a pairing whose trust step fails
+and writes no conf line, a scan with no controller in it, pairing a non-controller by
+hand — which trusts nothing and lists nothing — cancelling a scan, and closing. One
+check imports the addon directly, because the mocks hide the one command line that
+matters: `sudo -n tee <conf>`, the whole file on stdin. It prints PASS or FAIL per step
+and exits non-zero on any failure. No hardware, no radio, no sudo.
 
-The addon reads one environment variable for the tests' benefit: `ES_BT_SCAN_SECONDS`
-(default 20) sets how long a scan runs.
+The addon reads three environment variables for the tests' benefit:
+`ES_BT_SCAN_SECONDS` (default 45) sets how long a scan runs,
+`ES_BT_AUTOCONNECT_CONF` names the auto-reconnect list to read and rewrite, and
+`ES_BT_CONF_WRITE` replaces `sudo -n tee` with a single program.
 
 `tests/mock-nmcli.py` is a fake `nmcli` — enough of one to answer `dev wifi rescan`,
 `dev wifi list`, `dev wifi connect`, `connection show` (with and without

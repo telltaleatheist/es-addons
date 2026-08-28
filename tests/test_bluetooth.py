@@ -8,14 +8,25 @@ under the name "bluetoothctl", and walks the whole addon:
   * the main list: controllers one per row, everything else behind one row
   * the "Other paired devices" sub-list and a device menu opened from it
   * disconnect, and forget with its confirmation
+  * the Auto-reconnect row: On when BlueZ trusts the device, On when the
+    dial-out service's conf lists it, Off only when neither, and both halves
+    set together when it is toggled - with the other devices' lines and the
+    header surviving byte for byte, and a refused write leaving a row that
+    still says what is really true
   * a scan that discovers a controller only via a late [CHG] Icon line, and
-    pairs it on the spot: pair, then trust, then connect, in that order
+    pairs it on the spot: pair, then trust, then connect, in that order, and a
+    conf line, because a pad is what auto-reconnect is for
   * the same, with the trust step failing: the message must name the step
   * a scan that finds no controller: the found list, minus the nameless
-    placeholder and minus devices we already know, and pairing from it by hand
+    placeholder and minus devices we already know, and pairing from it by
+    hand - which trusts nothing and lists nothing, because a keyboard paired
+    here still belongs to the desk it came from
   * cancelling a scan with "back"
   * "back" on the main list, which closes the addon with status 0
   * a system with no bluetoothctl at all
+
+One check imports the addon directly, because the mocks hide the one command
+line that matters: "sudo -n tee <conf>", the whole file on stdin.
 
 Run it: python3 tests/test_bluetooth.py
 """
@@ -33,6 +44,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ADDON = os.path.join(os.path.dirname(HERE), "bluetooth", "bluetooth.py")
 MOCK = os.path.join(HERE, "mock-bluetoothctl.py")
+CONF_MOCK = os.path.join(HERE, "mock-conf-write.py")
 
 SCAN_SECONDS = 4.0
 READ_TIMEOUT = 30.0
@@ -50,6 +62,18 @@ LIVING_ROOM = "AA:AA:AA:AA:AA:04"
 HEADPHONES = "AA:AA:AA:AA:AA:05"
 LATE_PAD = "AA:AA:AA:AA:AA:06"
 
+# The auto-reconnect conf as the service's own is written: a header comment,
+# then one device per line with its name in a trailing comment.  Spelled out
+# rather than built from a format string, because these exact bytes are the
+# assertion - the addon must put its lines in the file's existing shape, and
+# must not disturb a byte of anybody else's.
+CONF_HEADER = "# MAC address            # device\n"
+CONF_PAD_ONE = "11:22:33:44:55:66        # Seeded Pad One\n"        # PAD_ONE
+CONF_KEYBOARD = "99:99:99:99:99:02        # Wireless Keyboard\n"    # KEYBOARD
+CONF_EIGHTBITDO = "AA:AA:AA:AA:AA:01        # 8BitDo Pro 2\n"       # EIGHTBITDO
+
+SEED_CONF = CONF_HEADER + CONF_PAD_ONE + CONF_KEYBOARD
+
 
 class Fail(Exception):
 	pass
@@ -64,17 +88,21 @@ def check(condition, message):
 
 SEED = {
 	"devices": [
+		# trusted and in the conf: auto-reconnect On by both mechanisms
 		{"mac": PAD_ONE, "name": "Seeded Pad One", "icon": "input-gaming",
-			"class": "0x002508", "connected": True},
+			"class": "0x002508", "connected": True, "trusted": True},
 		{"mac": PAD_TWO, "name": "Seeded Pad Two", "icon": "input-gaming",
-			"class": "0x002508", "connected": False},
+			"class": "0x002508", "connected": False, "trusted": True},
+		# trusted, and NOT in the conf: On by the incoming half alone
 		{"mac": SPEAKER, "name": "Kitchen Speaker", "icon": "audio-card",
-			"class": "0x240414", "connected": False},
+			"class": "0x240414", "connected": False, "trusted": True},
+		# in the conf, and NOT trusted: On by the dial-out half alone
 		{"mac": KEYBOARD, "name": "Wireless Keyboard", "icon": "input-keyboard",
-			"class": "0x002540", "connected": False},
+			"class": "0x002540", "connected": False, "trusted": False},
 		# plain "devices" returns this cache resident; "devices Paired" must not
 		{"mac": GHOST, "name": "Neighbor Gadget", "icon": "audio-card",
-			"class": "0x240414", "connected": False, "paired": False},
+			"class": "0x240414", "connected": False, "trusted": False,
+			"paired": False},
 	],
 	"discoverable": {
 		# no name and nothing else: BlueZ only has the placeholder for it
@@ -111,9 +139,21 @@ class Addon(object):
 	"""The addon, and the pipes ES would be holding."""
 
 	def __init__(self, state_path, bin_dir, with_bluetoothctl=True):
+		work = os.path.dirname(state_path)
+
+		self.conf = os.path.join(work, "bt-controller-autoconnect.conf")
+		self.conf_log = os.path.join(work, "conf-writes.jsonl")
+		self.conf_fail = os.path.join(work, "conf-write-refused")
+
 		environment = dict(os.environ)
 		environment["MOCK_BT_STATE"] = state_path
 		environment["ES_BT_SCAN_SECONDS"] = str(SCAN_SECONDS)
+		# the conf the dial-out service reads, and the stand-in for the
+		# "sudo -n tee" that rewrites it
+		environment["ES_BT_AUTOCONNECT_CONF"] = self.conf
+		environment["ES_BT_CONF_WRITE"] = os.path.join(bin_dir, "conf-write")
+		environment["MOCK_BT_CONF_LOG"] = self.conf_log
+		environment["MOCK_BT_CONF_FAIL"] = self.conf_fail
 		# the mock comes first, so it wins over a real bluetoothctl if there is
 		# one; the rest of PATH stays because the mock has a #!/usr/bin/env line
 		if with_bluetoothctl:
@@ -190,6 +230,33 @@ class Addon(object):
 				"expected %r after the progress screens, got %r" % (cmd, message))
 			return message, seen
 
+	def conf_text(self):
+		"""The auto-reconnect conf as it stands, or None if there is no file."""
+		try:
+			with open(self.conf, "r", newline="") as handle:
+				return handle.read()
+		except FileNotFoundError:
+			return None
+
+	def conf_writes(self):
+		"""Every write the addon has attempted, in order."""
+		try:
+			with open(self.conf_log) as handle:
+				return [json.loads(line) for line in handle if line.strip()]
+		except FileNotFoundError:
+			return []
+
+	def refuse_writes(self, refuse):
+		"""Make the privileged write fail, or stop making it fail.
+
+		A flag file rather than an environment variable: the addon is spawned
+		once and this has to change its mind halfway through the walk.
+		"""
+		if refuse:
+			open(self.conf_fail, "w").close()
+		elif os.path.exists(self.conf_fail):
+			os.remove(self.conf_fail)
+
 	def stop(self):
 		try:
 			if self.proc.poll() is None:
@@ -264,7 +331,8 @@ def step_other_devices(addon, state_path):
 	addon.send(event="select", id="dev:" + SPEAKER)
 	menu = addon.expect("list")
 	check(menu["title"] == "Kitchen Speaker", "title was %r" % menu["title"])
-	check(ids(menu) == ["connect", "forget"], "rows were %r" % ids(menu))
+	check(ids(menu) == ["connect", "autoconnect", "forget"],
+		"rows were %r" % ids(menu))
 
 	addon.send(event="back")
 	back_to_sub = addon.expect("list")
@@ -283,7 +351,7 @@ def step_disconnect(addon, state_path):
 	addon.send(event="select", id="dev:" + PAD_ONE)
 	menu = addon.expect("list")
 	check(menu["title"] == "Seeded Pad One", "title was %r" % menu["title"])
-	check(ids(menu) == ["disconnect", "forget"],
+	check(ids(menu) == ["disconnect", "autoconnect", "forget"],
 		"a connected device offered %r" % ids(menu))
 
 	addon.send(event="select", id="disconnect")
@@ -324,6 +392,140 @@ def step_forget(addon, state_path):
 		"rows after forgetting were %r" % labels(main))
 
 
+@step("auto-reconnect: On when both mechanisms are set, and when only one is")
+def step_autoconnect_either(addon, state_path):
+	# trusted AND listed in the conf
+	addon.send(event="select", id="dev:" + PAD_ONE)
+	menu = addon.expect("list")
+	check(ids(menu) == ["connect", "autoconnect", "forget"],
+		"the row is not between Connect and Forget: %r" % ids(menu))
+	check(detail(menu, "Auto-reconnect") == "On",
+		"a trusted, listed device says %r" % detail(menu, "Auto-reconnect"))
+
+	addon.send(event="back")
+	addon.expect("list")
+
+	addon.send(event="select", id="others")
+	addon.expect("list")
+
+	# trusted, and NOT in the conf: BlueZ would still let it in
+	addon.send(event="select", id="dev:" + SPEAKER)
+	menu = addon.expect("list")
+	check(detail(menu, "Auto-reconnect") == "On",
+		"a trusted device that is not in the conf says %r"
+		% detail(menu, "Auto-reconnect"))
+
+	addon.send(event="back")
+	addon.expect("list")
+
+	# in the conf, and NOT trusted: the service would still go and get it
+	addon.send(event="select", id="dev:" + KEYBOARD)
+	menu = addon.expect("list")
+	check(detail(menu, "Auto-reconnect") == "On",
+		"a listed device that is not trusted says %r"
+		% detail(menu, "Auto-reconnect"))
+
+	addon.send(event="back")
+	sub = addon.expect("list")
+	check(sub["title"] == "OTHER DEVICES", "back went to %r" % sub["title"])
+	addon.send(event="back")
+	addon.expect("list")
+
+
+@step("auto-reconnect: off untrusts, drops the line, and leaves the rest alone")
+def step_autoconnect_off(addon, state_path):
+	addon.send(event="select", id="others")
+	addon.expect("list")
+	addon.send(event="select", id="dev:" + KEYBOARD)
+	menu = addon.expect("list")
+	check(detail(menu, "Auto-reconnect") == "On",
+		"the keyboard starts at %r" % detail(menu, "Auto-reconnect"))
+
+	addon.send(event="select", id="autoconnect")
+	# expect_after_progress fails on anything but progress screens and the list
+	# that follows them, so a confirm screen in front of this would be caught
+	# here: the row acts at once, on purpose
+	menu, progress = addon.expect_after_progress("list")
+	check(progress and progress[0]["title"] == "AUTO-RECONNECT",
+		"no AUTO-RECONNECT progress screen, got %r" % progress)
+	check(menu["title"] == "Wireless Keyboard", "redrew %r" % menu["title"])
+	check(detail(menu, "Auto-reconnect") == "Off",
+		"the row still says %r" % detail(menu, "Auto-reconnect"))
+
+	log = read_state(state_path)["log"]
+	check("untrust " + KEYBOARD in log, "bluetoothctl was never asked to untrust")
+
+	text = addon.conf_text()
+	check(text == CONF_HEADER + CONF_PAD_ONE,
+		"the conf came back as %r" % text)
+
+
+@step("auto-reconnect: on trusts and adds exactly one line, in the file's style")
+def step_autoconnect_on(addon, state_path):
+	addon.send(event="select", id="autoconnect")
+	menu, progress = addon.expect_after_progress("list")
+	check(progress and progress[0]["title"] == "AUTO-RECONNECT",
+		"no AUTO-RECONNECT progress screen, got %r" % progress)
+	check(detail(menu, "Auto-reconnect") == "On",
+		"the row says %r" % detail(menu, "Auto-reconnect"))
+
+	check("trust " + KEYBOARD in read_state(state_path)["log"],
+		"bluetoothctl was never asked to trust")
+
+	text = addon.conf_text()
+	check(text == CONF_HEADER + CONF_PAD_ONE + CONF_KEYBOARD,
+		"the conf came back as %r" % text)
+	check(text.count(KEYBOARD) == 1,
+		"the keyboard is listed %d times" % text.count(KEYBOARD))
+
+	addon.send(event="back")
+	sub = addon.expect("list")
+	check(sub["title"] == "OTHER DEVICES", "back went to %r" % sub["title"])
+	addon.send(event="back")
+	addon.expect("list")
+
+
+@step("auto-reconnect: a refused write says so, and the row does not lie")
+def step_autoconnect_refused(addon, state_path):
+	addon.refuse_writes(True)
+	before = addon.conf_text()
+	writes = len(addon.conf_writes())
+
+	addon.send(event="select", id="others")
+	addon.expect("list")
+	addon.send(event="select", id="dev:" + KEYBOARD)
+	menu = addon.expect("list")
+	check(detail(menu, "Auto-reconnect") == "On",
+		"the keyboard starts at %r" % detail(menu, "Auto-reconnect"))
+
+	addon.send(event="select", id="autoconnect")
+	message, progress = addon.expect_after_progress("message")
+	check(message["title"] == "AUTO-RECONNECT", "title was %r" % message["title"])
+	check("Permission denied" in message["text"],
+		"tee's own words are missing from %r" % message["text"])
+
+	attempted = addon.conf_writes()[writes:]
+	check(len(attempted) == 1 and attempted[0]["failed"],
+		"the refused write was %r" % attempted)
+	check(addon.conf_text() == before, "a refused write changed the file anyway")
+
+	addon.send(event="confirm", value=True)
+	menu = addon.expect("list")
+	check(menu["title"] == "Wireless Keyboard", "the OK went to %r" % menu["title"])
+	# untrusting worked and the conf line did not go: the device can still be
+	# reached for, so the only honest answer is still On
+	check(detail(menu, "Auto-reconnect") == "On",
+		"the row claims %r after a write that never happened"
+		% detail(menu, "Auto-reconnect"))
+
+	addon.refuse_writes(False)
+
+	addon.send(event="back")
+	addon.expect("list")
+	addon.send(event="back")
+	addon.expect("list")
+
+
 @step("scan: a controller identified by a late [CHG] Icon is paired on sight")
 def step_auto_pair(addon, state_path):
 	patch_state(state_path, scan_script=[
@@ -355,6 +557,12 @@ def step_auto_pair(addon, state_path):
 	check("8BitDo Pro 2" in message["text"] and "connected" in message["text"].lower(),
 		"message was %r" % message["text"])
 
+	# a pad is what auto-reconnect is for, so pairing one turns it on: the
+	# trust step above is half of it and this line is the other half
+	text = addon.conf_text()
+	check(text == CONF_HEADER + CONF_PAD_ONE + CONF_KEYBOARD + CONF_EIGHTBITDO,
+		"the conf came back as %r" % text)
+
 	addon.send(event="confirm", value=True)
 	main = addon.expect("list")
 	check(labels(main)[0] == "8BitDo Pro 2", "rows were %r" % labels(main))
@@ -383,6 +591,10 @@ def step_pair_failure(addon, state_path):
 		"the failing step is not named in %r" % message["text"])
 	check("org.bluez.Error.Failed" in message["text"],
 		"bluetoothctl's own error line is missing from %r" % message["text"])
+
+	text = addon.conf_text()
+	check(text == CONF_HEADER + CONF_PAD_ONE + CONF_KEYBOARD + CONF_EIGHTBITDO,
+		"a pairing that stopped at trust wrote the conf anyway: %r" % text)
 
 	addon.send(event="confirm", value=True)
 	addon.expect("list")
@@ -414,7 +626,7 @@ def step_found_list(addon, state_path):
 	check(PAD_ONE not in json.dumps(found), "an already-known device was listed")
 
 
-@step("found list: pairing by hand asks first, and no means no")
+@step("found list: pairing by hand asks first, no means no, and a non-pad is left alone")
 def step_manual_pair(addon, state_path):
 	addon.send(event="select", id="new:" + HEADPHONES)
 	question = addon.expect("confirm")
@@ -430,9 +642,19 @@ def step_manual_pair(addon, state_path):
 
 	message, progress = addon.expect_after_progress("message")
 	pairing = [screen["text"] for screen in progress if screen["title"] == "PAIRING"]
-	check(len(pairing) == 3 and pairing[0].startswith("Pairing with"),
+	# pair and connect, and no trust step: a device that is not a controller is
+	# paired with auto-reconnect OFF, which is the keyboard-on-a-desk case
+	check(len(pairing) == 2 and pairing[0].startswith("Pairing with"),
 		"manual pairing said %r" % pairing)
 	check("Bedroom Headphones" in message["text"], "message was %r" % message["text"])
+
+	log = read_state(state_path)["log"]
+	check("trust " + HEADPHONES not in log, "a pair of headphones was trusted")
+
+	text = addon.conf_text()
+	check(HEADPHONES not in text, "a pair of headphones was listed for auto-reconnect")
+	check(text == CONF_HEADER + CONF_PAD_ONE + CONF_KEYBOARD + CONF_EIGHTBITDO,
+		"the conf came back as %r" % text)
 
 	addon.send(event="confirm", value=True)
 	main = addon.expect("list")
@@ -526,6 +748,79 @@ def run_without_bluetoothctl(state_path, bin_dir):
 		addon.stop()
 
 
+def run_pure_parts():
+	"""The two things the mocks hide: the real sudo line, and the conf rules.
+
+	The walk drives the addon through ES_BT_CONF_WRITE, so the command it would
+	really run on the Pi is the one thing it cannot see - and it is the one
+	that needs sudo.  The conf rules a walk can only show one at a time are
+	asked here directly: a line already there is not added a second time, a MAC
+	somebody typed in lower case is the same device, and a conf that is not
+	there yet is only created by a device going IN.  Nothing here spawns the
+	addon; it is imported and asked.
+	"""
+	title = "the privileged command line is sudo -n tee, and the conf rules hold"
+
+	try:
+		import importlib.util
+
+		spec = importlib.util.spec_from_file_location("bluetooth_addon", ADDON)
+		module = importlib.util.module_from_spec(spec)
+
+		# the addon starts watching ES's stdin the moment it is imported, and
+		# what a test's stdin is depends on how the test was started - a kqueue
+		# refuses a /dev/null outright (EINVAL) - so the import is handed a
+		# pipe to watch and the real fd 0 is put back straight after
+		read_fd, write_fd = os.pipe()
+		saved = os.dup(0)
+		try:
+			os.dup2(read_fd, 0)
+			spec.loader.exec_module(module)
+		finally:
+			os.dup2(saved, 0)
+			os.close(saved)
+			os.close(read_fd)
+			os.close(write_fd)
+
+		check(not module.CONF_WRITE,
+			"ES_BT_CONF_WRITE is set in this shell, so the real command line "
+			"cannot be checked")
+
+		path = "/etc/bt-controller-autoconnect.conf"
+		argv = module.conf_write_argv(path)
+		check(argv == ["sudo", "-n", "tee", path], "the command was %r" % argv)
+
+		lines = [CONF_HEADER, CONF_PAD_ONE]
+		once = module.conf_with(lines, KEYBOARD, "Wireless Keyboard")
+		check(once == [CONF_HEADER, CONF_PAD_ONE, CONF_KEYBOARD],
+			"adding a line gave %r" % once)
+		check(module.conf_with(once, KEYBOARD, "Wireless Keyboard") == once,
+			"the same device was listed twice")
+
+		# BlueZ prints a MAC in upper case; a conf somebody typed may not
+		lower = [CONF_HEADER, CONF_PAD_ONE.lower()]
+		check(module.conf_with(lower, PAD_ONE, "Seeded Pad One") == lower,
+			"a lower-case line was not read as the same device")
+		check(module.conf_without(lower, PAD_ONE) == [CONF_HEADER],
+			"a lower-case line was not removed")
+
+		fresh = module.conf_with([], PAD_ONE, "Seeded Pad One")
+		check(fresh == [CONF_HEADER, CONF_PAD_ONE],
+			"a conf created from nothing came out as %r" % fresh)
+		check(module.conf_without([], PAD_ONE) == [],
+			"turning auto-reconnect off invented a conf")
+
+		print("PASS  %s" % title)
+		return 0
+	except Fail as error:
+		print("FAIL  %s\n        %s" % (title, error))
+		return 1
+	except Exception as error:
+		print("FAIL  %s\n        unexpected %s: %s"
+			% (title, type(error).__name__, error))
+		return 1
+
+
 def main():
 	work = tempfile.mkdtemp(prefix="es-bluetooth-test-")
 	bin_dir = os.path.join(work, "bin")
@@ -534,16 +829,25 @@ def main():
 	shutil.copy(MOCK, os.path.join(bin_dir, "bluetoothctl"))
 	os.chmod(os.path.join(bin_dir, "bluetoothctl"), 0o755)
 
+	shutil.copy(CONF_MOCK, os.path.join(bin_dir, "conf-write"))
+	os.chmod(os.path.join(bin_dir, "conf-write"), 0o755)
+
 	state_path = os.path.join(work, "state.json")
 	with open(state_path, "w") as handle:
 		json.dump(SEED, handle, indent=2)
 
+	conf_path = os.path.join(work, "bt-controller-autoconnect.conf")
+	with open(conf_path, "w", newline="") as handle:
+		handle.write(SEED_CONF)
+
 	print("addon:  %s" % ADDON)
 	print("mock:   %s" % os.path.join(bin_dir, "bluetoothctl"))
-	print("state:  %s\n" % state_path)
+	print("state:  %s" % state_path)
+	print("conf:   %s\n" % conf_path)
 
 	failures = run_walk(state_path, bin_dir)
 	failures += run_without_bluetoothctl(state_path, bin_dir)
+	failures += run_pure_parts()
 
 	print("")
 	if failures:
@@ -551,7 +855,7 @@ def main():
 		print("working files kept in %s" % work)
 		return 1
 
-	print("OK - %d steps passed" % (len(STEPS) + 1))
+	print("OK - %d steps passed" % (len(STEPS) + 2))
 	shutil.rmtree(work, ignore_errors=True)
 	return 0
 
