@@ -41,6 +41,7 @@ PAD_ONE = "11:22:33:44:55:66"
 PAD_TWO = "AA:BB:CC:DD:EE:FF"
 SPEAKER = "99:99:99:99:99:01"
 KEYBOARD = "99:99:99:99:99:02"
+GHOST = "99:99:99:99:99:03"       # in BlueZ's cache after a scan, but never paired
 
 EIGHTBITDO = "AA:AA:AA:AA:AA:01"
 NAMELESS = "AA:AA:AA:AA:AA:02"
@@ -71,6 +72,9 @@ SEED = {
 			"class": "0x240414", "connected": False},
 		{"mac": KEYBOARD, "name": "Wireless Keyboard", "icon": "input-keyboard",
 			"class": "0x002540", "connected": False},
+		# plain "devices" returns this cache resident; "devices Paired" must not
+		{"mac": GHOST, "name": "Neighbor Gadget", "icon": "audio-card",
+			"class": "0x240414", "connected": False, "paired": False},
 	],
 	"discoverable": {
 		# no name and nothing else: BlueZ only has the placeholder for it

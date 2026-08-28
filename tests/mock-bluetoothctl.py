@@ -87,7 +87,10 @@ def scripted_icon(state, mac):
 # ------------------------------------------------------------- one-shots
 
 def cmd_devices(state, args):
+	paired_only = bool(args) and args[0].lower() == "paired"
 	for device in state.get("devices", []):
+		if paired_only and not device.get("paired", True):
+			continue
 		out("%sDevice%s %s %s" % (GREEN, RESET, device["mac"], device["name"]))
 	return 0
 

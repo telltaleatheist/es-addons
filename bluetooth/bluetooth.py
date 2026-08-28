@@ -293,7 +293,9 @@ def run_btctl(args, timeout):
 
 def list_known_devices():
 	"""Paired/known devices, newest bluetoothctl answer.  None if it failed."""
-	result = run_btctl(["devices"], QUICK_TIMEOUT)
+	# plain "devices" lists the whole cache - after a scan that is every gadget
+	# in radio range, not just ours - so ask for the paired ones by name
+	result = run_btctl(["devices", "Paired"], QUICK_TIMEOUT)
 	if not result.ok:
 		return None, result
 
