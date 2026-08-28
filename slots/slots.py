@@ -586,8 +586,6 @@ def show_list():
 	if pads and len(claimed) == len(pads):
 		items.append({"id": "done", "label": "All controllers assigned"})
 
-	items.append({"id": "exit", "label": "Start or B exits"})
-
 	send(cmd="list", title=TITLE, items=items)
 	screen = "list"
 

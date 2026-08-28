@@ -77,7 +77,7 @@ PAD_C = "Microsoft X-Box 360 pad"             # event7, joypad index 2
 HID_A = "0005:057E:2009.0003"
 HID_B = "0005:2DC8:3106.0004"
 
-EXIT_ROW = "Start or B exits"
+EXIT_ROW = "Start or B exits"    # removed: the host draws a BACK button now
 
 # the LED tree: pad A and pad B have player LEDs, the Xbox pad has none, and
 # the rest are the LEDs a Pi really does have sitting next to them
@@ -423,7 +423,8 @@ def step_list(addon, work):
 		"Player 1 says %r" % detail(main, "Player 1"))
 	check(detail(main, "Player 2") == "waiting",
 		"Player 2 says %r" % detail(main, "Player 2"))
-	check(labels(main)[-1] == EXIT_ROW, "the last row is %r" % labels(main)[-1])
+	check(EXIT_ROW not in labels(main),
+		"the exit row is back although the host owns BACK now")
 
 	blob = json.dumps(main)
 	check("IMU" not in blob, "the motion-sensor sibling was listed as a pad")
@@ -535,7 +536,8 @@ def step_second_claim(addon, work):
 		"Player 2 went to %r" % detail(main, "Player 2"))
 	check(has_row(main, "All controllers assigned"),
 		"nothing on the screen says every pad has a slot: %r" % labels(main))
-	check(labels(main)[-1] == EXIT_ROW, "the last row is %r" % labels(main)[-1])
+	check(EXIT_ROW not in labels(main),
+		"the exit row is back although the host owns BACK now")
 
 	check(work.cfg_text() == before,
 		"the file changed although the assignment did not")
